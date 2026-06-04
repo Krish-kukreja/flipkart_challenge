@@ -1,45 +1,42 @@
-# Flipkart Traffic Demand Prediction
+# Flipkart Traffic Demand Prediction - Our Approach
 
-This repository contains our solution for the Flipkart Grid Traffic Demand Prediction challenge. The objective of this project is to accurately forecast the normalized traffic demand (0.0 to 1.0) for a given geographical location (`geohash`) at a specific 15-minute time slot.
+This repository contains our solution for the Flipkart Grid Traffic Demand Prediction challenge. We built a model to forecast normalized traffic demand (0.0 to 1.0) for given locations (`geohash`) during specific 15-minute time slots.
 
-## 🚀 How Our Model Works
+## 1. Overall Approach
 
-Our approach models the problem as a **Spatial-Temporal Regression** task rather than a traditional time-series forecasting problem. By shifting away from multi-day rolling averages—which struggle due to structural missing data in the challenge—we focus on deeply analyzing specific micro and macro-level spatial trends.
+We built our final solution on a single LightGBM Regressor trained using Out-Of-Fold spatial and temporal mean encodings. When we looked at the data, we found that the training set only had data for Day 48 (all slots) and the morning slots of Day 49. The test set wanted us to predict what would happen in Day 49's afternoon and evening slots.
 
-### 1. Granular Time Parsing
-Traffic is highly cyclical and predictable based on the time of day. We engineer features to capture these patterns perfectly:
-- **Time Boxing:** We break timestamps down into `hour`, `minute`, and specific 15-minute `slot` increments.
-- **Cyclical Encoding:** Using sine and cosine transformations, we allow the model to understand that 11:59 PM is mathematically adjacent to 12:00 AM.
-- **Human Behavior Flags:** We introduce an `is_rush` feature to explicitly label peak morning commute (7-10 AM) and evening return (4-7 PM) hours.
+Since we only had a day and a half of history to work with, the usual time series methods like rolling averages or ARIMA were not going to work, especially since we needed to predict in bulk. So we treated it more like a location and time based prediction problem instead. We built a Cross-Validation setup that trains on the first half of Day 48 (slots 0-47) and tests on the second half (slots 48-95), which closely mirrors the actual test situation and makes sure we are not accidentally using future data to predict the past.
 
-### 2. Spatial "Target Encodings"
-To help the model understand exactly "how busy" a location typically is, we compute historical means. Crucially, these are computed strictly on our training fold to absolutely prevent target leakage.
-- **Micro-level (`ghh_encoded`):** The average traffic demand for an exact, specific `geohash` during a specific hour.
-- **Macro-level (`gh5h` & `gh4h`):** Sometimes a location is too new or sparse to have a reliable mean. We look at the parent 5-character and 4-character geohash zones. If a street is unknown, but the surrounding district is swamped, the model infers high traffic.
+## 2. Feature Engineering
 
-### 3. "Morning Momentum" & Trend Ratios
-Traffic isn't just about averages; it's about momentum. Is today a holiday? Did a localized event occur?
-To capture this, we track the momentum of the current morning and compare it to historical mornings:
-- **`morning_mean`:** How busy a geohash was *this morning* (slots 0-8).
-- **`lag1`:** The absolute most recently observed demand for the location right before our forecasting horizon begins.
-- **`morning_shift_ratio`:** We divide today's morning mean by yesterday's morning mean. If this ratio is > 1.0, the model learns that this specific area is organically "trending hotter" today and scales its afternoon predictions accordingly.
+We tried to capture demand patterns at two levels: the exact location (geohash) and the broader area around it (parent geohash).
 
-### 4. Interactive Weather Dynamics
-We noticed that weather doesn't affect traffic uniformly. Rain at 3 AM does very little, but rain during a 5 PM rush hour causes significant spikes. We encode these relationships using interaction terms like `temp_x_rush`.
+### A. Time and Weather
+We took the hour, minute, and slot out of the timestamp and also created two features, `hour_sin` and `hour_cos`, to help the model understand that time wraps around (so 11 PM and midnight are close to each other). We added a simple yes/no flag called `is_rush` to mark the busier parts of the day, specifically 7-10 AM and 4-7 PM. Where temperature data was missing, we filled it in using the typical temperature for that weather condition. We also created two extra features, `temp_x_rush` and `temp_bin_x_hour`, to capture how temperature and time of day work together.
 
----
+### B. Location Based Averages
+To make sure we were not leaking information from the future into our training, all location averages were calculated only from past data and then applied to the validation and test sets.
+- `ghh_encoded`: the average past demand for that exact location at that hour.
+- `gh5h_encoded` and `gh4h_encoded`: the same thing but for the wider area around the location, using 5 and 4 character parent geohashes.
 
-## 🛠️ Machine Learning Pipeline
+### C. Morning Trend Features
+Since we had Day 49 morning data available, we used it to get a sense of how the day was shaping up compared to Day 48.
+- `morning_mean`: the average demand for a location during the morning slots (0-8).
+- `lag1`: the last demand value we saw for that location, at slot 8.
+- `morning_shift_ratio`: how the morning of Day 49 compared to the morning of Day 48 for the same location. This basically tells the model if a spot is busier or quieter than it was the day before.
 
-Our entire approach is housed inside a single, deterministic pipeline: `src/pipeline.py`.
+## 3. Tools Used
 
-1. **Rigorous Cross-Validation:** The pipeline enforces a strict chronological split on Day 48 data. It trains on slots 0-47 and validates on slots 48-95. This perfectly simulates the test environment and prevents the model from looking into the future.
-2. **Algorithm:** We utilize **LightGBM** (`LGBMRegressor`). It was chosen for its blazing-fast tabular data processing, native support for categorical variables like `geohash`, and its ability to handle complex non-linear feature interactions seamlessly.
-3. **Hyperparameter Tuning:** The model parameters were optimized using an Optuna study. Rather than maximizing raw depth, we constrained the model (e.g., `max_depth: 7`, `num_leaves: 54`) with conservative regularization parameters (`reg_alpha`, `reg_lambda`) to ensure maximum generalizability to unseen data.
+- **Python 3**
+- **Pandas and NumPy:** for cleaning and working with the data.
+- **LightGBM:** the model we used for predictions. We picked it because it is fast, handles different types of data well, and does not overfit easily.
+- **Optuna:** we used this to find the best settings for the model over 50 attempts. We kept the settings on the conservative side (num_leaves: 54, max_depth: 7) to make sure the model generalizes well.
+- **Scikit-Learn:** used to measure how well the model performed using `r2_score`.
 
-## 📂 Repository Structure
+## 4. Files
 
-- `dataset/`: Contains `train.csv` and `test.csv` (Note: Ensure data is populated before running).
-- `src/pipeline.py`: The main orchestrator script. Runs data loading, leak-proof feature engineering, LightGBM training, and generates predictions.
-- `requirements.txt`: Python package dependencies necessary to run the pipeline.
-- `approach.txt`: A detailed, formal breakdown of our feature engineering for the competition reviewers.
+- `src/pipeline.ipynb`: the Jupyter Notebook that does everything from loading the data, building features, training the model, and writing out the final predictions in an easy-to-read format.
+- `src/pipeline.py`: the exact same pipeline but as a raw Python script.
+- `requirements.txt`: the list of Python packages needed to run the code.
+- `approach.txt`: a text summary of our approach.
